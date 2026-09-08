@@ -941,6 +941,7 @@ mod tests {
                 "Editor.insert_newline",
                 "Composer.queue",
                 "Global.open_external_editor",
+                "Global.open_model_picker",
                 "Global.copy",
                 "Global.toggle_vim_mode",
                 "Editor.delete_backward_word",

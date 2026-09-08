@@ -245,6 +245,7 @@ define_runtime_action_bindings! {
         open_agents,
         open_transcript,
         open_external_editor,
+        open_model_picker,
         copy,
         clear_terminal,
         toggle_vim_mode,

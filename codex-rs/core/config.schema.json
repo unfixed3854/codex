@@ -3928,6 +3928,7 @@
               "copy": null,
               "open_agents": null,
               "open_external_editor": null,
+              "open_model_picker": null,
               "open_transcript": null,
               "queue": null,
               "submit": null,
@@ -4601,6 +4602,14 @@
           ],
           "description": "Open the external editor for the current draft."
         },
+        "open_model_picker": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Open the model picker without changing the current draft."
+        },
         "open_transcript": {
           "allOf": [
             {
@@ -4773,6 +4782,7 @@
             "copy": null,
             "open_agents": null,
             "open_external_editor": null,
+            "open_model_picker": null,
             "open_transcript": null,
             "queue": null,
             "submit": null,

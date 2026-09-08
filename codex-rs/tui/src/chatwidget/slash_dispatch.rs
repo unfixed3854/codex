@@ -308,8 +308,7 @@ impl ChatWidget {
                 self.show_rename_prompt();
             }
             SlashCommand::Model => {
-                self.open_model_popup();
-                self.defer_input_until_settings_applied();
+                self.open_model_picker();
             }
             SlashCommand::Personality => {
                 self.open_personality_popup();

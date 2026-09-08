@@ -135,12 +135,12 @@ fn vim_insert_cursor_tracks_mode_and_normal_mode_commands() {
     view.textarea.set_cursor("rename".len());
     let mut config = codex_config::types::TuiKeymap::default();
     config.editor.move_left = Some(codex_config::types::KeybindingsSpec::One(
-        codex_config::types::KeybindingSpec("f2".to_string()),
+        codex_config::types::KeybindingSpec("f4".to_string()),
     ));
     let mut keymap = RuntimeKeymap::from_config(&config).expect("valid editor remap");
     keymap.vim_normal.delete_char = vec![key_hint::plain(KeyCode::F(3))];
     view.set_keymap_bindings(&keymap);
-    view.handle_key_event(KeyEvent::from(KeyCode::F(2)));
+    view.handle_key_event(KeyEvent::from(KeyCode::F(4)));
     assert_eq!(view.textarea.cursor(), "rename".len() - 1);
     view.textarea.set_cursor("rename".len());
 

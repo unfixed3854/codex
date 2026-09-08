@@ -11,6 +11,55 @@ fn all_model_presets() -> Vec<ModelPreset> {
 }
 
 #[tokio::test]
+async fn model_picker_shortcut_preserves_draft_for_continued_editing() -> Result<()> {
+    let mut app = make_test_app().await;
+    let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.chat_widget.handle_thread_session(test_thread_session(
+        ThreadId::new(),
+        app.config.cwd.to_path_buf(),
+    ));
+    app.chat_widget
+        .apply_external_edit("Explain this".to_string());
+
+    app.handle_key_event(
+        &mut tui,
+        &mut app_server,
+        KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
+    )
+    .await;
+
+    assert!(app.chat_widget.has_active_view());
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "Explain this");
+
+    app.handle_key_event(
+        &mut tui,
+        &mut app_server,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    )
+    .await;
+    for ch in " in detail".chars() {
+        app.handle_key_event(
+            &mut tui,
+            &mut app_server,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(/*millis*/ 70)).await;
+    app.chat_widget
+        .handle_paste_burst_tick(tui.frame_requester());
+
+    assert!(!app.chat_widget.has_active_view());
+    assert_eq!(
+        app.chat_widget.composer_text_with_pending(),
+        "Explain this in detail"
+    );
+    app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn model_picker_refresh_updates_app_catalog_from_app_server() -> Result<()> {
     let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
     let mut app_server = start_config_write_test_app_server(&app).await?;

@@ -89,6 +89,8 @@ pub(crate) struct AppKeymap {
     pub(crate) open_transcript: Vec<KeyBinding>,
     /// Open external editor for the current draft.
     pub(crate) open_external_editor: Vec<KeyBinding>,
+    /// Open the model picker without changing the current draft.
+    pub(crate) open_model_picker: Vec<KeyBinding>,
     /// Copy the last agent response to the clipboard.
     pub(crate) copy: Vec<KeyBinding>,
     /// Clear the terminal UI.
@@ -608,6 +610,15 @@ impl RuntimeKeymap {
                     || configured_context_alias_is_used(&keymap.list, alias)
                     || configured_context_alias_is_used(&keymap.approval, alias)
             });
+        let model_picker_default_is_shadowed = keymap.global.open_model_picker.is_none()
+            && (configured_main_surface_alias_is_used(keymap, "f2")
+                || configured_context_alias_is_used(&keymap.list, "f2")
+                || configured_context_alias_is_used(&keymap.approval, "f2")
+                || chords.bindings.iter().any(|binding| {
+                    binding.action.context.overlaps(KeymapContext::Global)
+                        && binding.chord.prefix.normalized_parts()
+                            == key_hint::plain(KeyCode::F(2)).normalized_parts()
+                }));
         let app = AppKeymap {
             open_agents: resolve_bindings(
                 keymap.global.open_agents.as_ref(),
@@ -624,6 +635,15 @@ impl RuntimeKeymap {
                 &defaults.app.open_external_editor,
                 "tui.keymap.global.open_external_editor",
             )?,
+            open_model_picker: if model_picker_default_is_shadowed {
+                Vec::new()
+            } else {
+                resolve_bindings(
+                    keymap.global.open_model_picker.as_ref(),
+                    &defaults.app.open_model_picker,
+                    "tui.keymap.global.open_model_picker",
+                )?
+            },
             copy: resolve_bindings(
                 keymap.global.copy.as_ref(),
                 &defaults.app.copy,
@@ -1288,6 +1308,10 @@ impl RuntimeKeymap {
                 keymap.global.open_external_editor.as_ref(),
                 app.open_external_editor.as_slice(),
             ),
+            (
+                keymap.global.open_model_picker.as_ref(),
+                app.open_model_picker.as_slice(),
+            ),
             (keymap.global.copy.as_ref(), app.copy.as_slice()),
             (
                 keymap.global.clear_terminal.as_ref(),
@@ -1490,6 +1514,7 @@ impl RuntimeKeymap {
                 open_agents: default_bindings![],
                 open_transcript: default_bindings![ctrl(KeyCode::Char('t'))],
                 open_external_editor: default_bindings![ctrl(KeyCode::Char('g'))],
+                open_model_picker: default_bindings![plain(KeyCode::F(2))],
                 copy: default_bindings![ctrl(KeyCode::Char('o'))],
                 clear_terminal: default_bindings![ctrl(KeyCode::Char('l'))],
                 toggle_vim_mode: default_bindings![],
@@ -1840,6 +1865,7 @@ impl RuntimeKeymap {
                 "open_external_editor",
                 self.app.open_external_editor.as_slice(),
             ),
+            ("open_model_picker", self.app.open_model_picker.as_slice()),
             ("copy", self.app.copy.as_slice()),
             ("clear_terminal", self.app.clear_terminal.as_slice()),
             ("toggle_vim_mode", self.app.toggle_vim_mode.as_slice()),
@@ -1938,6 +1964,7 @@ impl RuntimeKeymap {
                     "open_external_editor",
                     self.app.open_external_editor.as_slice(),
                 ),
+                ("open_model_picker", self.app.open_model_picker.as_slice()),
                 ("copy", self.app.copy.as_slice()),
                 ("clear_terminal", self.app.clear_terminal.as_slice()),
                 ("toggle_vim_mode", self.app.toggle_vim_mode.as_slice()),
@@ -1994,6 +2021,7 @@ impl RuntimeKeymap {
                     "open_external_editor",
                     self.app.open_external_editor.as_slice(),
                 ),
+                ("open_model_picker", self.app.open_model_picker.as_slice()),
                 ("copy", self.app.copy.as_slice()),
                 ("clear_terminal", self.app.clear_terminal.as_slice()),
                 ("chat.interrupt_turn", self.chat.interrupt_turn.as_slice()),
@@ -2583,6 +2611,55 @@ mod tests {
         let err = RuntimeKeymap::from_config(&keymap).expect_err("expected shadowing conflict");
         assert!(err.contains("copy"));
         assert!(err.contains("editor.yank"));
+    }
+
+    #[test]
+    fn model_picker_default_yields_to_existing_explicit_binding() {
+        let mut keymap = TuiKeymap::default();
+        keymap.editor.move_left = Some(one("f2"));
+
+        let runtime = RuntimeKeymap::from_config(&keymap).expect("config should parse");
+
+        assert_eq!(
+            (
+                runtime.app.open_model_picker,
+                runtime.editor.move_left.clone()
+            ),
+            (Vec::new(), vec![key_hint::plain(KeyCode::F(2))])
+        );
+    }
+
+    #[test]
+    fn model_picker_default_yields_to_existing_chord_prefix() {
+        let mut keymap = TuiKeymap::default();
+        keymap.editor.move_left = Some(one("f2 left"));
+
+        let runtime = RuntimeKeymap::from_config(&keymap).expect("config should parse");
+        let chords: Vec<_> = runtime
+            .chords
+            .bindings
+            .iter()
+            .filter(|binding| binding.chord.prefix == key_hint::plain(KeyCode::F(2)))
+            .map(|binding| {
+                (
+                    binding.action.context,
+                    binding.chord.prefix,
+                    binding.chord.completion,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            (runtime.app.open_model_picker, chords),
+            (
+                Vec::new(),
+                vec![(
+                    KeymapContext::Editor,
+                    key_hint::plain(KeyCode::F(2)),
+                    key_hint::plain(KeyCode::Left),
+                )],
+            )
+        );
     }
 
     #[test]

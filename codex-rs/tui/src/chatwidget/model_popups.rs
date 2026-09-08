@@ -11,6 +11,11 @@ pub(super) const MODEL_SELECTION_VIEW_ID: &str = "model-selection";
 pub(super) const ALL_MODELS_SELECTION_VIEW_ID: &str = "all-models-selection";
 
 impl ChatWidget {
+    pub(crate) fn open_model_picker(&mut self) {
+        self.open_model_popup();
+        self.defer_input_until_settings_applied();
+    }
+
     /// Open a popup to choose a quick auto model. Selecting "All models"
     /// opens the full picker with every available preset.
     pub(crate) fn open_model_popup(&mut self) {

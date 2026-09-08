@@ -1,7 +1,7 @@
 //! Keyboard input, external editor, and status-line dispatch for the TUI app.
 //!
 //! This module owns global key bindings that sit above ChatWidget, including transcript overlay
-//! entry, Ctrl-L clear, external editor launch, and agent navigation shortcuts.
+//! entry, model picker entry, Ctrl-L clear, external editor launch, and agent navigation shortcuts.
 
 use super::*;
 use crate::app_backtrack::SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE;
@@ -524,6 +524,11 @@ impl App {
             {
                 self.request_external_editor_launch(tui);
             }
+            return true;
+        }
+
+        if self.keymap.app.open_model_picker.is_pressed(key_event) {
+            self.chat_widget.open_model_picker();
             return true;
         }
 
