@@ -1,0 +1,9 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_server_host": "hera.ide-alioth.ts.net",
+  "dolt_server_user": "beads",
+  "dolt_database": "codex",
+  "project_id": "66c23795-803a-440b-927b-946c62788a53"
+}
