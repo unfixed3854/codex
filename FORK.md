@@ -17,3 +17,10 @@ that will help when syncing the fork.
 
 - `just install-codex` installs the local fork into `~/.local/bin/codex` on Unix.
 - Use this target instead of the upstream curl, npm, or Homebrew installers when installing this fork.
+
+## Local release build recursion limits
+
+- `codex-exec` and `codex-tui` use a recursion limit of 256 so release builds can
+  lay out the deeply nested in-process app-server future.
+- Keep these crate-level limits aligned with `codex-app-server` when syncing
+  changes that affect its async request dispatch.
