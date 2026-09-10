@@ -78,6 +78,14 @@ install:
     cargo fetch
     exit $LASTEXITCODE
 
+[unix]
+install-codex:
+    cargo install --path cli --locked --force --root "$HOME/.local"
+
+[windows]
+install-codex:
+    cargo install --path cli --locked --force
+
 # Run nextest with --no-fail-fast so all tests are run.
 #
 # Run `cargo install --locked cargo-nextest` if you don't have it installed.
