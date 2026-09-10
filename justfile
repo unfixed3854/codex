@@ -81,10 +81,12 @@ install:
 [unix]
 install-codex:
     cargo install --path cli --locked --force --root "$HOME/.local"
+    cargo install --path code-mode-host --locked --force --root "$HOME/.local"
 
 [windows]
 install-codex:
     cargo install --path cli --locked --force
+    cargo install --path code-mode-host --locked --force
 
 # Run nextest with --no-fail-fast so all tests are run.
 #
