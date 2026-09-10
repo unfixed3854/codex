@@ -1,19 +1,81 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
+import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import call
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from codex_package.cargo import build_source_binaries
+import codex_package.cargo as cargo_module
 from codex_package.cargo import source_binaries_for_target
 from codex_package.targets import PACKAGE_VARIANTS
 from codex_package.targets import TARGET_SPECS
 
 
 class SourceBinariesForTargetTest(unittest.TestCase):
+    def test_install_codex_uses_codex_v8_artifacts_for_code_mode_host(self) -> None:
+        install_codex = getattr(cargo_module, "install_codex", None)
+        self.assertIsNotNone(install_codex)
+        if install_codex is None:
+            return
+
+        v8_env = {
+            "RUSTY_V8_ARCHIVE": "/cache/librusty_v8.a.gz",
+            "RUSTY_V8_SRC_BINDING_PATH": "/cache/src_binding.rs",
+        }
+        with (
+            patch.object(
+                cargo_module,
+                "host_target_spec",
+                return_value=TARGET_SPECS["x86_64-unknown-linux-gnu"],
+            ),
+            patch.object(
+                cargo_module,
+                "resolve_codex_v8_cargo_env",
+                return_value=v8_env,
+            ),
+            patch.object(cargo_module.subprocess, "run") as run,
+        ):
+            install_codex(
+                cargo="cargo",
+                rustc="rustc",
+                install_root=Path("/tmp/codex-install"),
+            )
+
+        install_args = [
+            "--locked",
+            "--force",
+            "--root",
+            "/tmp/codex-install",
+        ]
+        self.assertEqual(
+            run.call_args_list,
+            [
+                call(
+                    ["cargo", "install", "--path", "cli", *install_args],
+                    cwd=cargo_module.CODEX_RS_ROOT,
+                    check=True,
+                ),
+                call(
+                    [
+                        "cargo",
+                        "install",
+                        "--path",
+                        "code-mode-host",
+                        *install_args,
+                    ],
+                    cwd=cargo_module.CODEX_RS_ROOT,
+                    check=True,
+                    env={**os.environ, **v8_env},
+                ),
+            ],
+        )
+
     def test_macos_package_with_prebuilt_entrypoint_builds_nothing(self) -> None:
         self.assertEqual(
             source_binaries_for_target(

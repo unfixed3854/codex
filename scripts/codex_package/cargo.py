@@ -8,6 +8,7 @@ from pathlib import Path
 from .targets import REPO_ROOT
 from .targets import PackageVariant
 from .targets import TargetSpec
+from .targets import TARGET_SPECS
 from .v8 import resolve_codex_v8_cargo_env
 
 
@@ -21,6 +22,58 @@ class SourceBuildOutputs:
     bwrap_bin: Path | None
     codex_command_runner_bin: Path | None
     codex_windows_sandbox_setup_bin: Path | None
+
+
+def install_codex(
+    *,
+    cargo: str,
+    rustc: str,
+    install_root: Path | None,
+) -> None:
+    install_args = ["--locked", "--force"]
+    if install_root is not None:
+        install_args.extend(["--root", str(install_root)])
+
+    subprocess.run(
+        [cargo, "install", "--path", "cli", *install_args],
+        cwd=CODEX_RS_ROOT,
+        check=True,
+    )
+
+    spec = host_target_spec(rustc=rustc)
+    v8_env = resolve_codex_v8_cargo_env(spec)
+    subprocess.run(
+        [cargo, "install", "--path", "code-mode-host", *install_args],
+        cwd=CODEX_RS_ROOT,
+        check=True,
+        env={**os.environ, **v8_env},
+    )
+
+
+def host_target_spec(*, rustc: str) -> TargetSpec:
+    result = subprocess.run(
+        [rustc, "-vV"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    host = next(
+        (
+            line.removeprefix("host: ")
+            for line in result.stdout.splitlines()
+            if line.startswith("host: ")
+        ),
+        None,
+    )
+    if host is None:
+        raise RuntimeError(f"Could not determine host target from `{rustc} -vV`.")
+    try:
+        return TARGET_SPECS[host]
+    except KeyError as error:
+        supported = ", ".join(sorted(TARGET_SPECS))
+        raise RuntimeError(
+            f"Unsupported Rust host target {host}. Supported targets: {supported}"
+        ) from error
 
 
 def build_source_binaries(

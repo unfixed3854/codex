@@ -15,8 +15,17 @@ that will help when syncing the fork.
 
 ## Fork installation target
 
-- `just install-codex` installs the local fork into `~/.local/bin/codex` on Unix.
-- Use this target instead of the upstream curl, npm, or Homebrew installers when installing this fork.
+- `just install-codex` installs the local fork's `codex`, `logs_client`, and
+  `codex-code-mode-host` binaries. On Unix, it installs them under
+  `~/.local/bin`.
+- The code-mode host build resolves the native Rust host target and downloads
+  the matching checksum-verified `rusty_v8` archive and generated binding from
+  the Codex release. The pinned V8 version is not available from the upstream
+  `rusty_v8` release location.
+- Use this target instead of the upstream curl, npm, or Homebrew installers when
+  installing this fork.
+- Introduced in: `09c6e2b43` (`chore(fork): add local install target`); code-mode
+  host installation added in `41df6d8c4` (`fix(build): install code mode host`).
 
 ## Local release build recursion limits
 
