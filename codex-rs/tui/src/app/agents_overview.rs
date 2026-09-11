@@ -3,6 +3,10 @@
 #[path = "agents_overview_composer.rs"]
 mod composer;
 
+#[path = "agents_overview_errors.rs"]
+mod errors;
+
+use super::agents_overview_view::AgentsOverviewFocus;
 use super::agents_overview_view::AgentsOverviewGroup;
 use super::agents_overview_view::AgentsOverviewRow;
 use super::agents_overview_view::AgentsOverviewView;
@@ -13,6 +17,7 @@ use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line_for_keymap;
 use crate::chatwidget::ThreadInputStateRestoreMode;
+use crate::chatwidget::UserMessage;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::Thread;
@@ -20,7 +25,10 @@ use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
+use codex_protocol::models::snapshot_local_user_input;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::user_input::UserInput as CoreUserInput;
 
 pub(crate) const AGENTS_OVERVIEW_VIEW_ID: &str = "agents-overview";
 
@@ -28,9 +36,12 @@ pub(crate) const AGENTS_OVERVIEW_VIEW_ID: &str = "agents-overview";
 pub(super) struct AgentsOverviewState {
     /// Missing metadata records a local resume until the next metadata refresh.
     pub(super) threads: HashMap<ThreadId, Option<Thread>>,
+    /// Local visibility only; activity and metadata refreshes never reveal hidden roots.
+    pub(super) hidden_threads: HashSet<ThreadId>,
     pub(super) last_messages: HashMap<ThreadId, String>,
     pub(super) activity: HashMap<ThreadId, super::agents_overview_details::AgentsOverviewActivity>,
     pub(super) initialized: bool,
+    pub(super) unsent_prompt: Option<String>,
     pub(super) request_id: Option<Uuid>,
     pub(super) refresh_pending: bool,
     pub(super) refresh_thread_ids: HashSet<ThreadId>,
@@ -53,7 +64,11 @@ impl Drop for AgentsOverviewState {
 }
 
 impl App {
-    pub(super) fn open_agents_overview(&mut self, app_server: &AppServerSession) {
+    pub(super) fn open_agents_overview(
+        &mut self,
+        app_server: &AppServerSession,
+        focus: AgentsOverviewFocus,
+    ) {
         if matches!(self.app_server_target, AppServerTarget::Embedded) {
             let workload_identity_selected = codex_login::is_workload_identity_selected();
             self.chat_widget.show_selection_view(SelectionViewParams {
@@ -103,11 +118,19 @@ impl App {
             return;
         }
 
-        self.agents_overview
-            .view_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .focus_composer();
+        {
+            let mut state = self
+                .agents_overview
+                .view_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Launch into composition; returning from a task starts in browsing mode.
+            // Populated refreshes preserve any subsequent, explicit focus change.
+            match focus {
+                AgentsOverviewFocus::Composer => state.focus_composer(),
+                AgentsOverviewFocus::List => state.focus = AgentsOverviewFocus::List,
+            }
+        }
         let threads = self
             .agents_overview
             .threads
@@ -132,6 +155,13 @@ impl App {
         }
         self.agents_overview.request_id = None;
         self.agents_overview.refresh_task = None;
+        self.agents_overview
+            .view_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refresh_failed = !result
+            .as_ref()
+            .is_ok_and(|refresh| refresh.recent_seed_complete);
         match result {
             Ok(refresh) => {
                 self.agents_overview.initialized = refresh.recent_seed_complete;
@@ -155,14 +185,6 @@ impl App {
             }
             Err(error) => {
                 tracing::warn!(%error, "failed to refresh shared agents");
-                if self
-                    .chat_widget
-                    .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)
-                    .is_some()
-                {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to load shared agents: {error}"));
-                }
             }
         }
         for notifications in
@@ -266,6 +288,9 @@ impl App {
             let Ok(thread_id) = ThreadId::from_string(&root.id) else {
                 continue;
             };
+            if self.agents_overview.hidden_threads.contains(&thread_id) {
+                continue;
+            }
             rows.push(AgentsOverviewRow {
                 details: self.agents_overview_details(root, &children),
                 thread: root.clone(),
@@ -276,11 +301,21 @@ impl App {
         }
 
         self.sync_agents_overview_composer();
+        // Wait for discovery and retained metadata before treating the list as empty.
+        if self.agents_overview.initialized
+            && rows.is_empty()
+            && self.agents_overview.threads.iter().all(|(id, thread)| {
+                thread.is_some() || self.agents_overview.hidden_threads.contains(id)
+            })
+            && let Ok(mut state) = self.agents_overview.view_state.lock()
+            && state.focus == AgentsOverviewFocus::List
+        {
+            state.focus_composer();
+        }
 
         AgentsOverviewView::new(
             rows,
             selected_thread_id,
-            self.primary_thread_id.is_none(),
             self.config.features.enabled(Feature::Worktrees)
                 && !crate::uses_remote_workspace_or_environment(
                     &self.app_server_target,
@@ -299,8 +334,14 @@ impl App {
         root_thread_id: ThreadId,
     ) -> color_eyre::Result<AppRunControl> {
         if self.current_displayed_thread_id() == Some(root_thread_id)
-            && !self.thread_unavailable(root_thread_id)
+            && (!self.thread_unavailable(root_thread_id)
+                || self.chat_widget.is_external_writer_view())
         {
+            // Keep the displayed read-only snapshot frozen; R explicitly retries attachment.
+            if let Ok(mut state) = self.agents_overview.view_state.lock() {
+                state.completion = Some(crate::bottom_pane::ViewCompletion::Accepted);
+            }
+            self.chat_widget.pre_draw_tick();
             return Ok(AppRunControl::Continue);
         }
         if self.primary_thread_id != Some(root_thread_id) {
@@ -355,7 +396,7 @@ impl App {
             {
                 Ok(thread) => thread,
                 Err(error) => {
-                    self.chat_widget.add_error_message(format!(
+                    self.add_agents_overview_error(format!(
                         "Agent session {root_thread_id} is unavailable: {error}"
                     ));
                     return Ok(AppRunControl::Continue);
@@ -365,7 +406,7 @@ impl App {
                 target_thread.status,
                 codex_app_server_protocol::ThreadStatus::NotLoaded
             );
-            let (mut resume_config, local_settings) = if unloaded {
+            let (mut resume_config, mut local_settings) = if unloaded {
                 let target_session = SessionTarget {
                     path: target_thread.path.clone(),
                     thread_id: root_thread_id,
@@ -392,14 +433,27 @@ impl App {
                 {
                     Ok(config) => config,
                     Err(error) => {
-                        self.chat_widget
-                            .add_error_message(format!("Failed to load task settings: {error}"));
+                        self.add_agents_overview_error(format!(
+                            "Failed to load task settings: {error}"
+                        ));
                         return Ok(AppRunControl::Continue);
                     }
                 }
             };
-            if unloaded && self.reject_remote_resume_permission_override(&resume_config) {
-                return Ok(AppRunControl::Continue);
+            if !unloaded {
+                if let Err(control) = self
+                    .confirm_directory_trust(
+                        tui,
+                        app_server,
+                        &mut resume_config,
+                        target_thread.cwd.as_path(),
+                        Some(&target_thread),
+                    )
+                    .await
+                {
+                    return Ok(control);
+                }
+                local_settings = crate::local_settings::LocalSettings::from(&resume_config);
             }
             let baseline_approval = resume_config.permissions.approval_policy.value();
             let baseline_permissions =
@@ -422,7 +476,7 @@ impl App {
                                     && !profile.matches_config(&resume_config)
                             })
                     {
-                        self.chat_widget.add_error_message(
+                        self.add_agents_overview_error(
                             "Cannot resume task without preserving the selected permissions."
                                 .to_string(),
                         );
@@ -447,8 +501,13 @@ impl App {
             {
                 Ok(resumed) => resumed,
                 Err(error) => {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to attach to task: {error}"));
+                    let message = if crate::app_server_session::is_active_writer_error(&error) {
+                        tracing::warn!("failed to attach to task managed by another server");
+                        "Task is open elsewhere. Another app server is managing this task, so it can’t be attached here.".to_string()
+                    } else {
+                        format!("Failed to attach to task: {error}")
+                    };
+                    self.add_agents_overview_error(message);
                     return Ok(AppRunControl::Continue);
                 }
             };
@@ -494,6 +553,7 @@ impl App {
                             == RuntimePermissionProfileTurnOverride::LegacySandbox
                 });
             self.local_settings = local_settings;
+            self.refresh_server_version_overview_notice(CODEX_CLI_VERSION);
             self.config = resume_config;
             tui.set_notification_settings(
                 self.local_settings.tui.notification_settings.method,
@@ -510,8 +570,7 @@ impl App {
                 )
                 .await
             {
-                self.chat_widget
-                    .add_error_message(format!("Failed to attach to task: {error}"));
+                self.add_agents_overview_error(format!("Failed to attach to task: {error}"));
                 return Ok(AppRunControl::Continue);
             }
             let mut destination_config = self.chat_widget.config_ref().clone();
@@ -613,8 +672,9 @@ impl App {
 
     pub(super) async fn dispatch_agents_overview_task(
         &mut self,
+        tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
-        prompt: String,
+        prompt: UserMessage,
         cwd: Option<AbsolutePathBuf>,
     ) {
         self.refresh_in_memory_config_from_disk_best_effort("starting a background task")
@@ -633,13 +693,28 @@ impl App {
                 Ok(config) => config,
                 Err(error) => {
                     self.restore_agents_overview_prompt(prompt);
-                    return self
-                        .chat_widget
-                        .add_error_message(format!("Failed to load project settings: {error}"));
+                    return self.add_agents_overview_error(format!(
+                        "Failed to load project settings: {error}"
+                    ));
                 }
             },
             None => self.fresh_session_config(),
         };
+        let trust_cwd = config.cwd.to_path_buf();
+        if self
+            .confirm_directory_trust(
+                tui,
+                app_server,
+                &mut config,
+                &trust_cwd,
+                /*resumed_thread*/ None,
+            )
+            .await
+            .is_err()
+        {
+            self.restore_agents_overview_prompt(prompt);
+            return;
+        }
         if let Some(profile) = self.runtime_permission_profile_override.as_ref()
             && profile.active_permission_profile.is_some()
             && (!profile.matches_config(&config)
@@ -647,9 +722,9 @@ impl App {
                     != self.config.permissions.profile_workspace_roots())
         {
             self.restore_agents_overview_prompt(prompt);
-            return self
-                .chat_widget
-                .add_error_message("Permission profile has different settings.".to_string());
+            return self.add_agents_overview_error(
+                "Permission profile has different settings.".to_string(),
+            );
         }
         self.apply_runtime_policy_overrides(&mut config, RuntimePolicyOverrideScope::All);
         let defaults_cwd = match app_server.thread_params_mode() {
@@ -660,7 +735,12 @@ impl App {
                 .unwrap_or(Path::new(".")),
         };
         let mut server_model_cleared = false;
-        match super::new_session::read_new_session_defaults(app_server, defaults_cwd).await {
+        match crate::config_update::read_effective_config_if_supported(
+            app_server.request_handle(),
+            defaults_cwd,
+        )
+        .await
+        {
             Ok(Some(defaults)) => {
                 server_model_cleared = defaults.model.is_none();
                 let use_server_provider = matches!(
@@ -694,7 +774,7 @@ impl App {
             Ok(None) => {}
             Err(error) => {
                 self.restore_agents_overview_prompt(prompt);
-                return self.chat_widget.add_error_message(format!(
+                return self.add_agents_overview_error(format!(
                     "Failed to load background task settings: {error}"
                 ));
             }
@@ -719,6 +799,67 @@ impl App {
                 .or_else(|| self.model_catalog.models.first())
                 .map(|model| model.model.clone());
         }
+        let model = config.model.as_deref().or_else(|| {
+            self.model_catalog
+                .models
+                .iter()
+                .find(|model| model.is_default)
+                .or_else(|| self.model_catalog.models.first())
+                .map(|model| model.model.as_str())
+        });
+        if !prompt.local_images.is_empty()
+            && let Some(model) = model
+            && self.model_catalog.models.iter().any(|preset| {
+                preset.model == model && !preset.input_modalities.contains(&InputModality::Image)
+            })
+        {
+            let message = format!(
+                "Model {model} does not support image inputs. Remove images or switch models."
+            );
+            self.restore_agents_overview_prompt(prompt);
+            self.add_agents_overview_error(message);
+            return;
+        }
+        let images = prompt
+            .local_images
+            .iter()
+            .map(|image| {
+                Ok(CoreUserInput::LocalImage {
+                    path: std::path::absolute(&image.path)?,
+                    detail: None,
+                })
+            })
+            .collect::<std::io::Result<Vec<_>>>();
+        let images = match images {
+            Ok(images) => images,
+            Err(error) => {
+                self.restore_agents_overview_prompt(prompt);
+                self.add_agents_overview_error(format!("Failed to prepare image: {error}"));
+                return;
+            }
+        };
+        let images = if app_server.uses_remote_workspace() && !images.is_empty() {
+            match tokio::task::spawn_blocking(move || {
+                let mut images = images;
+                for image in &mut images {
+                    snapshot_local_user_input(image)?;
+                }
+                Ok::<_, std::io::Error>(images)
+            })
+            .await
+            .map_err(std::io::Error::other)
+            .and_then(|result| result)
+            {
+                Ok(images) => images,
+                Err(error) => {
+                    self.restore_agents_overview_prompt(prompt);
+                    self.add_agents_overview_error(format!("Failed to prepare image: {error}"));
+                    return;
+                }
+            }
+        } else {
+            images
+        };
         match app_server
             .start_thread_with_session_start_source(
                 &self.local_settings,
@@ -734,13 +875,17 @@ impl App {
                 self.agents_overview
                     .dispatched_requests
                     .insert(thread_id, Vec::new());
-                self.submit_agents_overview_prompt(app_server, thread_id, prompt)
-                    .await;
+                self.submit_agents_overview_prompt(
+                    app_server,
+                    thread_id,
+                    prompt,
+                    images.into_iter().map(Into::into).collect(),
+                )
+                .await;
             }
             Err(error) => {
                 self.restore_agents_overview_prompt(prompt);
-                self.chat_widget
-                    .add_error_message(format!("Failed to start background task: {error}"));
+                self.add_agents_overview_error(format!("Failed to start background task: {error}"));
             }
         }
     }
@@ -749,26 +894,34 @@ impl App {
         &mut self,
         app_server: &AppServerSession,
         thread_id: ThreadId,
-        prompt: String,
+        prompt: UserMessage,
+        mut input: Vec<UserInput>,
     ) {
+        if !prompt.text.is_empty() {
+            input.push(UserInput::Text {
+                text: prompt.text.clone(),
+                text_elements: prompt
+                    .text_elements
+                    .iter()
+                    .cloned()
+                    .map(Into::into)
+                    .collect(),
+            });
+        }
         let result = app_server
             .request_handle()
             .request_typed::<TurnStartResponse>(ClientRequest::TurnStart {
                 request_id: RequestId::String(Uuid::new_v4().to_string()),
                 params: TurnStartParams {
                     thread_id: thread_id.to_string(),
-                    input: vec![UserInput::Text {
-                        text: prompt.clone(),
-                        text_elements: Vec::new(),
-                    }],
+                    input,
                     ..Default::default()
                 },
             })
             .await;
         if let Err(error) = result {
             self.restore_agents_overview_prompt(prompt);
-            self.chat_widget
-                .add_error_message(format!("Failed to send task message: {error}"));
+            self.add_agents_overview_error(format!("Failed to send task message: {error}"));
         }
     }
 
@@ -808,8 +961,9 @@ impl App {
             {
                 Ok(turn_id) => turn_id,
                 Err(error) => {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to stop background task: {error}"));
+                    self.add_agents_overview_error(format!(
+                        "Failed to stop background task: {error}"
+                    ));
                     self.refresh_agents_overview_threads(app_server);
                     return;
                 }
@@ -819,8 +973,7 @@ impl App {
             return;
         };
         if let Err(error) = app_server.turn_interrupt(thread_id, turn_id).await {
-            self.chat_widget
-                .add_error_message(format!("Failed to stop background task: {error}"));
+            self.add_agents_overview_error(format!("Failed to stop background task: {error}"));
             self.refresh_agents_overview_threads(app_server);
         }
     }

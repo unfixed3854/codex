@@ -97,7 +97,6 @@ use codex_app_server_protocol::item_event_to_server_notification;
 use codex_core::CodexThread;
 use codex_core::ThreadManager;
 use codex_features::Feature;
-use codex_guardian_v2::StrictReviewReason;
 use codex_protocol::ThreadId;
 use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
 use codex_protocol::items::TurnItem as CoreTurnItem;
@@ -355,10 +354,16 @@ pub(crate) async fn apply_bespoke_event_handling(
             );
             outgoing.send_server_notification(notification).await;
             if assessment.status == codex_protocol::protocol::GuardianAssessmentStatus::InProgress
-                && conversation
-                    .thread_extension_data()
-                    .remove::<StrictReviewReason>()
-                    .is_some()
+                && matches!(
+                    assessment.review_reason,
+                    Some(
+                        codex_protocol::approvals::GuardianReviewReason::ElevatedRisk
+                            | codex_protocol::approvals::GuardianReviewReason::StaleScore
+                            | codex_protocol::approvals::GuardianReviewReason::IncompatibleCompaction
+                            | codex_protocol::approvals::GuardianReviewReason::ScoringFailure
+                            | codex_protocol::approvals::GuardianReviewReason::AuthorizationChanged
+                    )
+                )
             {
                 outgoing
                     .send_server_notification(ServerNotification::StrictReviewRequired(
@@ -1240,7 +1245,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 state.pending_rollbacks.take()
             };
 
-            if let Some(request_id) = pending {
+            if let Some((request_id, _completion_tx)) = pending {
                 let _thread_list_state_permit = match thread_list_state_permit.acquire().await {
                     Ok(permit) => permit,
                     Err(err) => {
@@ -1638,7 +1643,7 @@ async fn handle_thread_rollback_failed(
 ) {
     let pending_rollback = thread_state.lock().await.pending_rollbacks.take();
 
-    if let Some(request_id) = pending_rollback {
+    if let Some((request_id, _completion_tx)) = pending_rollback {
         outgoing
             .send_error(request_id, invalid_request(message))
             .await;
@@ -2429,6 +2434,7 @@ mod tests {
             GuardianAssessmentStatus::Aborted => (None, None, None),
         };
         GuardianAssessmentEvent {
+            review_reason: None,
             id: format!("review-{id}"),
             target_item_id: Some(id.to_string()),
             plugin_id: Some("sample@openai-curated".to_string()),
@@ -2498,6 +2504,7 @@ mod tests {
             &conversation_id,
             "turn-from-event",
             &GuardianAssessmentEvent {
+                review_reason: None,
                 id: "review-1".to_string(),
                 target_item_id: Some("item-1".to_string()),
                 plugin_id: None,
@@ -2546,6 +2553,7 @@ mod tests {
             &conversation_id,
             "turn-from-event",
             &GuardianAssessmentEvent {
+                review_reason: None,
                 id: "review-2".to_string(),
                 target_item_id: Some("item-2".to_string()),
                 plugin_id: None,
@@ -2602,6 +2610,7 @@ mod tests {
             &conversation_id,
             "turn-from-event",
             &GuardianAssessmentEvent {
+                review_reason: None,
                 id: "review-3".to_string(),
                 target_item_id: None,
                 plugin_id: None,
@@ -3272,6 +3281,7 @@ mod tests {
                 "turn-1",
                 &EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
                     turn_id: "turn-1".to_string(),
+                    root_turn_id: None,
                     trace_id: None,
                     started_at: Some(42),
                     model_context_window: None,
@@ -3307,6 +3317,7 @@ mod tests {
                 id: "turn-1".to_string(),
                 msg: EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
                     turn_id: "turn-1".to_string(),
+                    root_turn_id: None,
                     trace_id: None,
                     started_at: Some(42),
                     model_context_window: None,
@@ -3583,6 +3594,7 @@ mod tests {
                 &event_turn_id,
                 &EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
                     turn_id: event_turn_id.clone(),
+                    root_turn_id: None,
                     trace_id: None,
                     started_at: Some(42),
                     model_context_window: None,

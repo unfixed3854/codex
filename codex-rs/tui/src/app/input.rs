@@ -3,6 +3,7 @@
 //! This module owns global key bindings that sit above ChatWidget, including transcript overlay
 //! entry, model picker entry, Ctrl-L clear, external editor launch, and agent navigation shortcuts.
 
+use super::agents_overview_view::AgentsOverviewFocus;
 use super::*;
 use crate::app_backtrack::SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE;
 use crate::keymap::bindings_for_action;
@@ -121,15 +122,23 @@ impl App {
     }
 
     fn active_keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
-        if self.overlay.is_some() {
-            return crate::keymap::KeymapContextSet::new(crate::keymap::KeymapContext::Pager);
-        }
+        use crate::keymap::KeymapContext;
+        use crate::keymap::KeymapContextSet;
 
+        if self.overlay.is_some() {
+            return KeymapContextSet::new(KeymapContext::Pager);
+        }
+        let voice_available = self.chat_widget.realtime_microphone_shortcut_available();
         let contexts = self.chat_widget.keymap_contexts();
         if self.chat_widget.no_modal_or_popup_active() {
-            contexts
-                .with(crate::keymap::KeymapContext::Global)
-                .with(crate::keymap::KeymapContext::Chat)
+            let contexts = contexts
+                .with(KeymapContext::Global)
+                .with(KeymapContext::Chat);
+            if voice_available {
+                contexts.with(KeymapContext::Voice)
+            } else {
+                contexts
+            }
         } else {
             contexts
         }
@@ -218,6 +227,10 @@ impl App {
         } else {
             self.chat_widget.set_raw_output_mode(enabled);
         }
+        if self.overlay.is_some() {
+            self.schedule_immediate_resize_reflow(tui);
+            return;
+        }
         let terminal_width = tui.terminal.last_known_screen_size.into();
         if let Err(err) = self.reflow_transcript_now(tui, terminal_width) {
             tracing::warn!(error = %err, "failed to reflow transcript after raw output mode toggle");
@@ -239,6 +252,13 @@ impl App {
             && key_event.kind == KeyEventKind::Press
         {
             let modifiers = key_event.modifiers;
+            if key_event.code == KeyCode::Esc
+                && modifiers == KeyModifiers::NONE
+                && !matches!(self.app_server_target, AppServerTarget::Embedded)
+            {
+                self.open_agents_overview(app_server, AgentsOverviewFocus::List);
+                return;
+            }
             let quit = match key_event.code {
                 KeyCode::Esc => modifiers == KeyModifiers::NONE,
                 KeyCode::Char('q' | 'Q') => {
@@ -267,7 +287,11 @@ impl App {
                     cwd: None,
                     history_mode: None,
                 };
-                let _ = self.resume_target_session(tui, app_server, target).await;
+                if let Ok(AppRunControl::Exit(_)) =
+                    self.resume_target_session(tui, app_server, target).await
+                {
+                    self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate));
+                }
                 return;
             }
         }
@@ -513,7 +537,7 @@ impl App {
         }
 
         if self.keymap.app.open_agents.is_pressed(key_event) {
-            self.open_agents_overview(app_server);
+            self.open_agents_overview(app_server, AgentsOverviewFocus::List);
             return true;
         }
 

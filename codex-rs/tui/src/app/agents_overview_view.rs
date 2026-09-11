@@ -7,6 +7,8 @@ mod input;
 mod render;
 
 use super::agents_overview::AGENTS_OVERVIEW_VIEW_ID;
+use super::agents_overview_details::AgentsOverviewDetails;
+use crate::app_event::AgentsOverviewAction;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPaneView;
@@ -85,7 +87,7 @@ impl AgentsOverviewGroup {
 
 #[derive(Clone)]
 pub(super) struct AgentsOverviewRow {
-    pub(super) details: Vec<Line<'static>>,
+    pub(super) details: AgentsOverviewDetails,
     pub(super) thread: Thread,
     pub(super) thread_id: ThreadId,
     pub(super) group: AgentsOverviewGroup,
@@ -131,7 +133,9 @@ pub(super) struct AgentsOverviewViewState {
     pub(super) composer: Option<ChatComposer>,
     pub(super) key_chord_hint: Option<Vec<(String, String)>>,
     pub(super) focus: AgentsOverviewFocus,
+    pub(super) refresh_failed: bool,
     pub(super) connection_notice: Option<&'static str>,
+    pub(super) server_version_notice: Option<String>,
     search: String,
     searching: bool,
     pub(super) status_grouping: bool,
@@ -179,7 +183,6 @@ pub(super) struct AgentsOverviewView {
     project_groups: Vec<AgentsOverviewProjectGroup>,
     selected: usize,
     state: Arc<Mutex<AgentsOverviewViewState>>,
-    exit_on_cancel: bool,
     app_event_tx: AppEventSender,
     keymap: ListKeymap,
     agents_keymap: AgentsKeymap,
@@ -191,7 +194,6 @@ impl AgentsOverviewView {
     pub(super) fn new(
         rows: Vec<AgentsOverviewRow>,
         selected_thread_id: Option<ThreadId>,
-        exit_on_cancel: bool,
         worktrees_enabled: bool,
         app_event_tx: AppEventSender,
         keymap: RuntimeKeymap,
@@ -222,7 +224,6 @@ impl AgentsOverviewView {
             project_groups,
             selected,
             state,
-            exit_on_cancel,
             app_event_tx,
             keymap: keymap.list,
             agents_keymap: keymap.agents,
@@ -321,7 +322,6 @@ impl AgentsOverviewView {
                 state.search.clear();
                 state.searching = false;
             }
-            self.state().completion = Some(ViewCompletion::Accepted);
         }
     }
 
@@ -478,17 +478,18 @@ impl AgentsOverviewView {
             lines.push("Branch".dim().into());
             lines.push(branch.clone().into());
         }
-        let preview = crate::text_formatting::truncate_text(&row.thread.preview, width * 2);
+        let preview = super::agents_overview_details::preview_markdown(&row.thread.preview);
         lines.extend([Line::default(), Line::from("Prompt".dim())]);
-        let mut prompt = crate::wrapping::word_wrap_lines(
+        let prompt = crate::markdown_render::render_markdown_text_with_width_and_cwd(
             match preview.as_str() {
                 "" => "No prompt available.",
                 preview => preview,
-            }
-            .lines()
-            .map(Line::from),
-            width,
-        );
+            },
+            Some(width),
+            Some(row.thread.cwd.as_path()),
+        )
+        .lines;
+        let mut prompt = crate::wrapping::word_wrap_lines(prompt, width);
         if prompt.len() > 2 {
             prompt.truncate(2);
             prompt[1] = "…".dim().into();
@@ -497,7 +498,17 @@ impl AgentsOverviewView {
         let details_start = crate::wrapping::word_wrap_lines(lines[..4].to_vec(), width).len();
         let mut lines = crate::wrapping::word_wrap_lines(lines, width);
         if self.state().connection_notice.is_none() {
-            let mut details = crate::wrapping::word_wrap_lines(row.details.clone(), width);
+            let mut details = row.details.lines.clone();
+            if let Some((message, cwd)) = &row.details.last_message {
+                details.extend([Line::default(), "Last message".dim().into()]);
+                crate::markdown::append_markdown(
+                    &crate::markdown::unwrap_markdown_fences(message),
+                    Some(width),
+                    Some(cwd.as_path()),
+                    &mut details,
+                );
+            }
+            let mut details = crate::wrapping::word_wrap_lines(details, width);
             let available = usize::from(area.height).saturating_sub(lines.len());
             if details.len() > available {
                 details.truncate(available);
@@ -649,7 +660,9 @@ impl BottomPaneView for AgentsOverviewView {
             return;
         }
 
-        if self.state().connection_notice.is_some() && !self.agents_keymap.new_task.is_pressed(key)
+        if self.state().connection_notice.is_some()
+            && !self.agents_keymap.new_task.is_pressed(key)
+            && self.keymap.action_for(key) != Some(ListAction::Cancel)
         {
             match self.keymap.action_for(key) {
                 Some(ListAction::MoveUp) => self.move_selection(/*forward*/ false),
@@ -686,6 +699,29 @@ impl BottomPaneView for AgentsOverviewView {
                     state.searching = false;
                     state.renaming = true;
                 }
+            }
+            return;
+        }
+        for (bindings, action) in [
+            (&self.agents_keymap.archive, AgentsOverviewAction::Archive),
+            (&self.agents_keymap.delete, AgentsOverviewAction::Delete),
+        ] {
+            if bindings.is_pressed(key) {
+                if let Some(row) = self.selected_row() {
+                    self.app_event_tx
+                        .send(AppEvent::ConfirmAgentsOverviewAction {
+                            thread_id: row.thread_id,
+                            action,
+                        });
+                }
+                return;
+            }
+        }
+        if self.agents_keymap.hide.is_pressed(key) {
+            if let Some(row) = self.selected_row() {
+                self.app_event_tx.send(AppEvent::HideAgentsOverviewThread {
+                    thread_id: row.thread_id,
+                });
             }
             return;
         }
@@ -726,11 +762,7 @@ impl BottomPaneView for AgentsOverviewView {
                         state.input.clear();
                         state.renaming = false;
                     } else {
-                        if self.exit_on_cancel {
-                            self.app_event_tx
-                                .send(AppEvent::Exit(crate::app::ExitMode::Immediate));
-                        }
-                        state.completion = Some(ViewCompletion::Cancelled);
+                        state.focus_composer();
                     }
                 }
                 ListAction::PageUp | ListAction::PageDown => {
@@ -738,6 +770,7 @@ impl BottomPaneView for AgentsOverviewView {
                         self.move_selection(action == ListAction::PageDown);
                     }
                 }
+                ListAction::MoveRight if !self.state().editing_metadata() => self.activate(),
                 ListAction::MoveLeft | ListAction::MoveRight => {}
             }
         } else if key.code == KeyCode::Backspace {

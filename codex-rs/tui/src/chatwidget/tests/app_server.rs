@@ -187,7 +187,7 @@ fn open_safety_buffering_retry_confirmation(
 #[tokio::test]
 async fn safety_buffering_offers_one_retry_with_app_wording() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let mut preset = get_available_model(&chat, "gpt-5.4");
+    let mut preset = get_available_model(&chat, "gpt-5.5");
     preset.model = "faster-model".to_string();
     preset.display_name = "Faster Model".to_string();
     chat.model_catalog = Arc::new(ModelCatalog::new(vec![preset]));
@@ -824,7 +824,11 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
         /*replay_kind*/ None,
     );
 
-    assert!(drain_insert_history(&mut rx).is_empty());
+    let completion_cells = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| normalize_completion_timestamps(lines_to_single_string(lines).trim()))
+        .collect::<Vec<_>>();
+    assert_eq!(completion_cells, vec!["done [completion time]"]);
     assert!(!chat.bottom_pane.is_task_running());
     assert!(chat.bottom_pane.status_widget().is_none());
     assert_eq!(
@@ -1004,26 +1008,31 @@ async fn config_warning_during_turn_remains_inline() {
 }
 
 #[tokio::test]
-async fn live_app_server_config_warning_prefixes_summary() {
+async fn startup_config_warning_is_not_repeated_by_thread() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let message = "Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.";
 
-    chat.handle_server_notification(
+    for notification in [
         ServerNotification::ConfigWarning(ConfigWarningNotification {
-            summary: "Invalid configuration; using defaults.".to_string(),
+            summary: message.to_string(),
             details: None,
             path: None,
             range: None,
         }),
-        /*replay_kind*/ None,
-    );
+        ServerNotification::Warning(WarningNotification {
+            thread_id: Some("thread-1".to_string()),
+            message: message.to_string(),
+        }),
+    ] {
+        chat.handle_server_notification(notification, /*replay_kind*/ None);
+    }
 
     let cells = drain_insert_history_transcript(&mut rx);
-    assert_eq!(cells.len(), 1, "expected one warning history cell");
-    let rendered = lines_to_single_string(&cells[0]);
-    assert!(
-        rendered.contains("Invalid configuration; using defaults."),
-        "expected config warning summary, got {rendered}"
-    );
+    assert_eq!(cells.len(), 1);
+    insta::assert_snapshot!(lines_to_single_string(&cells[0]), @"
+    ⚠ Codex is ignoring 1 unrecognized configuration setting. Check for typos or
+      deprecated settings.
+    ");
 }
 
 #[tokio::test]
