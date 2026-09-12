@@ -25,7 +25,20 @@ async fn model_picker_shortcut_preserves_draft_for_continued_editing() -> Result
     app.handle_key_event(
         &mut tui,
         &mut app_server,
-        KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('\u{0010}'), KeyModifiers::NONE),
+    )
+    .await;
+
+    assert!(!app.chat_widget.has_active_view());
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "Explain this");
+
+    app.handle_key_event(
+        &mut tui,
+        &mut app_server,
+        KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
     )
     .await;
 

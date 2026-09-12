@@ -56,6 +56,13 @@ pub(crate) use chords::KeyChordMatcher;
 pub(crate) use chords::KeymapContextSet;
 pub(crate) use chords::RuntimeChordKeymap;
 
+// This shortcut intentionally requires enhanced keyboard reporting. Legacy
+// terminals collapse it to Ctrl+P, which remains the editor's move-up binding.
+const DEFAULT_OPEN_MODEL_PICKER_BINDING: KeyBinding = KeyBinding::new(
+    KeyCode::Char('p'),
+    KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
+);
+
 /// Runtime keymap used by TUI input handlers.
 ///
 /// Resolution precedence is:
@@ -629,13 +636,13 @@ impl RuntimeKeymap {
                     || configured_context_alias_is_used(&keymap.approval, alias)
             });
         let model_picker_default_is_shadowed = keymap.global.open_model_picker.is_none()
-            && (configured_main_surface_alias_is_used(keymap, "f2")
-                || configured_context_alias_is_used(&keymap.list, "f2")
-                || configured_context_alias_is_used(&keymap.approval, "f2")
+            && (configured_main_surface_alias_is_used(keymap, "ctrl-shift-p")
+                || configured_context_alias_is_used(&keymap.list, "ctrl-shift-p")
+                || configured_context_alias_is_used(&keymap.approval, "ctrl-shift-p")
                 || chords.bindings.iter().any(|binding| {
                     binding.action.context.overlaps(KeymapContext::Global)
                         && binding.chord.prefix.normalized_parts()
-                            == key_hint::plain(KeyCode::F(2)).normalized_parts()
+                            == DEFAULT_OPEN_MODEL_PICKER_BINDING.normalized_parts()
                 }));
         // Preserve existing Ctrl+X shortcuts and chord prefixes when adding this default.
         let voice_mute_default_is_shadowed = keymap.chat.toggle_voice_mute.is_none()
@@ -1579,7 +1586,7 @@ impl RuntimeKeymap {
                 open_agents: default_bindings![],
                 open_transcript: default_bindings![ctrl(KeyCode::Char('t'))],
                 open_external_editor: default_bindings![ctrl(KeyCode::Char('g'))],
-                open_model_picker: default_bindings![plain(KeyCode::F(2))],
+                open_model_picker: default_bindings![raw(DEFAULT_OPEN_MODEL_PICKER_BINDING)],
                 copy: default_bindings![ctrl(KeyCode::Char('o'))],
                 clear_terminal: default_bindings![ctrl(KeyCode::Char('l'))],
                 toggle_vim_mode: default_bindings![],
@@ -2695,7 +2702,7 @@ mod tests {
     #[test]
     fn model_picker_default_yields_to_existing_explicit_binding() {
         let mut keymap = TuiKeymap::default();
-        keymap.editor.move_left = Some(one("f2"));
+        keymap.editor.move_left = Some(one("ctrl-shift-p"));
 
         let runtime = RuntimeKeymap::from_config(&keymap).expect("config should parse");
 
@@ -2704,21 +2711,31 @@ mod tests {
                 runtime.app.open_model_picker,
                 runtime.editor.move_left.clone()
             ),
-            (Vec::new(), vec![key_hint::plain(KeyCode::F(2))])
+            (
+                Vec::new(),
+                vec![KeyBinding::new(
+                    KeyCode::Char('p'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                )],
+            )
         );
     }
 
     #[test]
     fn model_picker_default_yields_to_existing_chord_prefix() {
         let mut keymap = TuiKeymap::default();
-        keymap.editor.move_left = Some(one("f2 left"));
+        keymap.editor.move_left = Some(one("ctrl-shift-p left"));
 
         let runtime = RuntimeKeymap::from_config(&keymap).expect("config should parse");
+        let model_picker_binding = KeyBinding::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
         let chords: Vec<_> = runtime
             .chords
             .bindings
             .iter()
-            .filter(|binding| binding.chord.prefix == key_hint::plain(KeyCode::F(2)))
+            .filter(|binding| binding.chord.prefix == model_picker_binding)
             .map(|binding| {
                 (
                     binding.action.context,
@@ -2734,7 +2751,7 @@ mod tests {
                 Vec::new(),
                 vec![(
                     KeymapContext::Editor,
-                    key_hint::plain(KeyCode::F(2)),
+                    model_picker_binding,
                     key_hint::plain(KeyCode::Left),
                 )],
             )

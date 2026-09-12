@@ -8,7 +8,9 @@ that will help when syncing the fork.
 
 ## Model picker shortcut
 
-- F2 opens the model picker while preserving the current draft.
+- Ctrl+Shift+P opens the model picker while preserving the current draft on
+  terminals that support enhanced keyboard reporting. Legacy terminals collapse
+  it to Ctrl+P, which does not open the picker.
 - Configurable through `tui.keymap.global.open_model_picker`.
 - Motivation: switch models without typing a slash command.
 - Introduced in: `e6fc7fa73` (`feat(tui): add model picker shortcut`).
